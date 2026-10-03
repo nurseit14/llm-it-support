@@ -1,0 +1,2 @@
+{"messages": [{"role": "user", "content": "What is Docker?"}, {"role": "assistant", "content": "Docker is a platform for building, packaging, and running applications in isolated environments called containers."}]}
+{"messages": [{"role": "user", "content": "What is Git?"}, {"role": "assistant", "content": "Git is a distributed version control system used to track changes in files and collaborate on software projects."}]}
