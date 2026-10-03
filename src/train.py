@@ -1,10 +1,20 @@
-import json
 from pathlib import Path
 
 import torch
-from peft import LoraConfig, get_peft_model
+
+from torch.utils.data import DataLoader
+
+from peft import (
+    LoraConfig,
+    get_peft_model
+)
 
 from model import load_model
+
+from dataset import (
+    ITSupportDataset,
+    create_collate_fn
+)
 
 
 # ============================================================
@@ -13,12 +23,14 @@ from model import load_model
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+
 TRAIN_DATA_PATH = (
     PROJECT_ROOT
     / "data"
     / "processed"
     / "train.jsonl"
 )
+
 
 VAL_DATA_PATH = (
     PROJECT_ROOT
@@ -27,150 +39,44 @@ VAL_DATA_PATH = (
     / "validation.jsonl"
 )
 
+
 OUTPUT_DIR = (
     PROJECT_ROOT
     / "outputs"
     / "lora_adapter"
 )
 
+
 NUM_EPOCHS = 3
+
 LEARNING_RATE = 2e-4
 
+BATCH_SIZE = 4
 
-# ============================================================
-# 2. HELPER: LOAD DATASET
-# ============================================================
-
-def load_dataset(path):
-    examples = []
-
-    with open(path, "r", encoding="utf-8") as file:
-        for line in file:
-            if line.strip():
-                example = json.loads(line)
-                examples.append(example)
-
-    return examples
+MAX_LENGTH = 512
 
 
 # ============================================================
-# 3. HELPER: PREPARE ONE EXAMPLE
-# ============================================================
-
-def prepare_example(example, tokenizer, device):
-
-    messages = example["messages"]
-
-    # --------------------------------------------------------
-    # Complete conversation
-    #
-    # USER:
-    # What is Docker?
-    #
-    # ASSISTANT:
-    # Docker is a platform...
-    # --------------------------------------------------------
-
-    formatted_text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False
-    )
-
-
-    # --------------------------------------------------------
-    # Prompt WITHOUT assistant response
-    #
-    # USER:
-    # What is Docker?
-    #
-    # ASSISTANT:
-    # --------------------------------------------------------
-
-    prompt_messages = messages[:-1]
-
-    prompt_text = tokenizer.apply_chat_template(
-        prompt_messages,
-        tokenize=False,
-        add_generation_prompt=True
-    )
-
-
-    # --------------------------------------------------------
-    # Tokenize complete conversation
-    # --------------------------------------------------------
-
-    inputs = tokenizer(
-        formatted_text,
-        return_tensors="pt"
-    ).to(device)
-
-
-    # --------------------------------------------------------
-    # Tokenize prompt only
-    # --------------------------------------------------------
-
-    prompt_inputs = tokenizer(
-        prompt_text,
-        return_tensors="pt"
-    ).to(device)
-
-
-    input_ids = inputs["input_ids"]
-
-    attention_mask = inputs[
-        "attention_mask"
-    ]
-
-
-    # --------------------------------------------------------
-    # Create labels
-    # --------------------------------------------------------
-
-    labels = input_ids.clone()
-
-
-    # Number of tokens BEFORE assistant answer
-    prompt_length = (
-        prompt_inputs["input_ids"]
-        .shape[1]
-    )
-
-
-    # --------------------------------------------------------
-    # Assistant-only loss masking
-    #
-    # SYSTEM     -> -100
-    # USER       -> -100
-    # ASSISTANT  -> real token IDs
-    #
-    # PyTorch ignores -100 when calculating loss.
-    # --------------------------------------------------------
-
-    labels[:, :prompt_length] = -100
-
-
-    return (
-        input_ids,
-        attention_mask,
-        labels
-    )
-
-
-# ============================================================
-# 4. LOAD BASE MODEL
+# 2. LOAD BASE MODEL
 # ============================================================
 
 model, tokenizer = load_model()
 
+
 print("Base model loaded.")
-print("Device:", model.device)
+
+print(
+    "Device:",
+    model.device
+)
 
 
 # ============================================================
-# 5. CONFIGURE LoRA
+# 3. LoRA CONFIGURATION
 # ============================================================
 
 lora_config = LoraConfig(
+
     r=8,
 
     lora_alpha=16,
@@ -188,7 +94,10 @@ lora_config = LoraConfig(
 )
 
 
-# Attach LoRA adapters
+# ============================================================
+# 4. ATTACH LoRA
+# ============================================================
+
 model = get_peft_model(
     model,
     lora_config
@@ -201,44 +110,100 @@ model.print_trainable_parameters()
 
 
 # ============================================================
-# 6. LOAD TRAINING + VALIDATION DATA
+# 5. CREATE DATASETS
 # ============================================================
 
-training_examples = load_dataset(
-    TRAIN_DATA_PATH
+train_dataset = ITSupportDataset(
+
+    TRAIN_DATA_PATH,
+
+    tokenizer,
+
+    max_length=MAX_LENGTH
 )
 
-validation_examples = load_dataset(
-    VAL_DATA_PATH
+
+validation_dataset = ITSupportDataset(
+
+    VAL_DATA_PATH,
+
+    tokenizer,
+
+    max_length=MAX_LENGTH
 )
 
 
 print(
     f"\nTraining examples: "
-    f"{len(training_examples)}"
+    f"{len(train_dataset)}"
 )
+
 
 print(
     f"Validation examples: "
-    f"{len(validation_examples)}"
+    f"{len(validation_dataset)}"
 )
 
 
 # ============================================================
-# 7. CREATE OPTIMIZER
+# 6. CREATE COLLATE FUNCTION
+# ============================================================
+
+collate_fn = create_collate_fn(
+    tokenizer
+)
+
+
+# ============================================================
+# 7. CREATE DATALOADERS
+# ============================================================
+
+train_loader = DataLoader(
+
+    train_dataset,
+
+    batch_size=BATCH_SIZE,
+
+    shuffle=True,
+
+    collate_fn=collate_fn
+)
+
+
+validation_loader = DataLoader(
+
+    validation_dataset,
+
+    batch_size=BATCH_SIZE,
+
+    shuffle=False,
+
+    collate_fn=collate_fn
+)
+
+
+print(
+    f"Training batches: "
+    f"{len(train_loader)}"
+)
+
+
+print(
+    f"Validation batches: "
+    f"{len(validation_loader)}"
+)
+
+
+# ============================================================
+# 8. CREATE OPTIMIZER
 # ============================================================
 
 optimizer = torch.optim.AdamW(
+
     model.parameters(),
+
     lr=LEARNING_RATE
 )
-
-
-# ============================================================
-# 8. TRAINING MODE
-# ============================================================
-
-model.train()
 
 
 # ============================================================
@@ -247,6 +212,7 @@ model.train()
 
 for epoch in range(NUM_EPOCHS):
 
+
     print(
         f"\n========== "
         f"EPOCH {epoch + 1}/{NUM_EPOCHS} "
@@ -254,35 +220,46 @@ for epoch in range(NUM_EPOCHS):
     )
 
 
-    total_training_loss = 0.0
-
-
     # ========================================================
     # TRAINING
     # ========================================================
 
-    for example_number, example in enumerate(
-        training_examples,
+    model.train()
+
+
+    total_training_loss = 0.0
+
+
+    for batch_number, batch in enumerate(
+        train_loader,
         start=1
     ):
 
+
         # ----------------------------------------------------
-        # Prepare example
+        # Move batch to same device as model
         # ----------------------------------------------------
 
-        (
-            input_ids,
-            attention_mask,
-            labels
-        ) = prepare_example(
-            example,
-            tokenizer,
-            model.device
+        input_ids = (
+            batch["input_ids"]
+            .to(model.device)
+        )
+
+
+        attention_mask = (
+            batch["attention_mask"]
+            .to(model.device)
+        )
+
+
+        labels = (
+            batch["labels"]
+            .to(model.device)
         )
 
 
         # ----------------------------------------------------
-        # Clear gradients from previous step
+        # Clear gradients
         # ----------------------------------------------------
 
         optimizer.zero_grad()
@@ -293,8 +270,11 @@ for epoch in range(NUM_EPOCHS):
         # ----------------------------------------------------
 
         outputs = model(
+
             input_ids=input_ids,
+
             attention_mask=attention_mask,
+
             labels=labels
         )
 
@@ -320,13 +300,15 @@ for epoch in range(NUM_EPOCHS):
         # Record loss
         # ----------------------------------------------------
 
-        total_training_loss += loss.item()
+        total_training_loss += (
+            loss.item()
+        )
 
 
         print(
-            f"Example "
-            f"{example_number}/"
-            f"{len(training_examples)} "
+            f"Batch "
+            f"{batch_number}/"
+            f"{len(train_loader)} "
             f"| Loss: "
             f"{loss.item():.4f}"
         )
@@ -337,8 +319,10 @@ for epoch in range(NUM_EPOCHS):
     # ========================================================
 
     average_training_loss = (
+
         total_training_loss
-        / len(training_examples)
+
+        / len(train_loader)
     )
 
 
@@ -353,45 +337,59 @@ for epoch in range(NUM_EPOCHS):
     # VALIDATION
     # ========================================================
 
-    # Switch model into evaluation mode
     model.eval()
 
 
     total_validation_loss = 0.0
 
 
-    # We don't need gradients during validation
     with torch.no_grad():
 
-        for example in validation_examples:
 
-            (
-                input_ids,
-                attention_mask,
-                labels
-            ) = prepare_example(
-                example,
-                tokenizer,
-                model.device
+        for batch in validation_loader:
+
+
+            # ------------------------------------------------
+            # Move batch to device
+            # ------------------------------------------------
+
+            input_ids = (
+                batch["input_ids"]
+                .to(model.device)
             )
 
 
-            # ----------------------------------------------
-            # Forward pass ONLY
-            # ----------------------------------------------
+            attention_mask = (
+                batch["attention_mask"]
+                .to(model.device)
+            )
+
+
+            labels = (
+                batch["labels"]
+                .to(model.device)
+            )
+
+
+            # ------------------------------------------------
+            # Forward pass only
+            # ------------------------------------------------
 
             outputs = model(
+
                 input_ids=input_ids,
+
                 attention_mask=attention_mask,
+
                 labels=labels
             )
 
 
-            validation_loss = outputs.loss
+            loss = outputs.loss
 
 
             total_validation_loss += (
-                validation_loss.item()
+                loss.item()
             )
 
 
@@ -400,8 +398,10 @@ for epoch in range(NUM_EPOCHS):
     # ========================================================
 
     average_validation_loss = (
+
         total_validation_loss
-        / len(validation_examples)
+
+        / len(validation_loader)
     )
 
 
@@ -412,17 +412,14 @@ for epoch in range(NUM_EPOCHS):
     )
 
 
-    # IMPORTANT:
-    # Return to training mode for next epoch
-    model.train()
-
-
 # ============================================================
-# 10. SAVE LoRA ADAPTER
+# 10. SAVE ADAPTER
 # ============================================================
 
 OUTPUT_DIR.mkdir(
+
     parents=True,
+
     exist_ok=True
 )
 
@@ -430,6 +427,7 @@ OUTPUT_DIR.mkdir(
 model.save_pretrained(
     OUTPUT_DIR
 )
+
 
 tokenizer.save_pretrained(
     OUTPUT_DIR
@@ -440,7 +438,10 @@ tokenizer.save_pretrained(
 # 11. FINISHED
 # ============================================================
 
-print("\nTraining finished!")
+print(
+    "\nTraining finished!"
+)
+
 
 print(
     f"LoRA adapter saved to:\n"
